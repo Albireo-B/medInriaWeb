@@ -116,7 +116,8 @@ class GirderLoadLogic(BaseLogic[None]):
         logger.debug(f"Setting api URL to {girder_config.api_url}")
         self._girder_config = girder_config
         self.file_fetcher = FileFetcher(
-            GirderClient(apiUrl=girder_config.api_url), girder_config.assetstore, self._temp_directory, self._cache_mode
+            GirderClient(apiUrl=girder_config.api_url), girder_config.assetstore, self._temp_directory, self._cache_mode,
+            girder_config.download_bypass_token
         )
 
     def update_token(self, token) -> None:

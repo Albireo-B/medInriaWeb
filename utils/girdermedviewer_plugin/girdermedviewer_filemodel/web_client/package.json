@@ -1,0 +1,19 @@
+{
+  "name": "girdermedviewer_plugin",
+  "version": "1.0.0",
+  "description": "Girder plugin for MedInriaWeb integration",
+  "type": "module",
+  "main": "./dist/girdermedviewer_plugin.umd.cjs",
+  "module": "./dist/girdermedviewer_plugin.js",
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@girder/core": "^5.0.0",
+    "vite": "^8.0.0"
+  },
+  "girderPlugin": {
+    "name": "girdermedviewer_plugin",
+    "main": "./dist/girdermedviewer_plugin.umd.cjs"
+  }
+}

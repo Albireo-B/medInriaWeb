@@ -45,6 +45,7 @@ class GirderConfig:
     default_location: str | dict[str, Any] = field(default_factory=dict)
     assetstore: str | None = None
     api_url: str | None = None
+    download_bypass_token: str | None = None
 
     def __post_init__(self) -> None:
         self.api_url = urljoin(self.url, self.api_root) if self.url else None
@@ -59,7 +60,7 @@ class CacheMode(Enum):
 
 
 class FileFetcher:
-    def __init__(self, girder_client, assetstore_dir=None, temp_dir=None, cache_mode=CacheMode.No):
+    def __init__(self, girder_client, assetstore_dir=None, temp_dir=None, cache_mode=CacheMode.No, download_bypass_token=None):
         """
         :example:
         ```
@@ -73,6 +74,7 @@ class FileFetcher:
         self.assetstore_dir_path: Path | None = Path(assetstore_dir) if assetstore_dir else None
         self.girder_client = girder_client
         self.cache = cache_mode
+        self.download_bypass_token = download_bypass_token
 
         if cache_mode == CacheMode.Permanent:
             if temp_dir is None:
@@ -95,7 +97,16 @@ class FileFetcher:
 
     def _download_file(self, file, file_path: Path):
         logger.info(f"Download {file['name']} to {file_path}")
-        self.girder_client.downloadFile(file["_id"], str(file_path))
+        # Use sendRestRequest directly to pass custom headers
+        path = f"file/{file['_id']}/download"
+        headers = {}
+        if self.download_bypass_token:
+            headers["X-Download-Bypass-Token"] = self.download_bypass_token
+        response = self.girder_client.sendRestRequest('get', path, stream=True, jsonResp=False, headers=headers)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
 
     def get_item_files(self, item):
         return self.girder_client.listFile(item["_id"])
