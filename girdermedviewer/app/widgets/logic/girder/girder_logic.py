@@ -11,6 +11,7 @@ from ..scene import SceneLogic
 from .girder_browser_logic import GirderBrowserLogic
 from .girder_connection_logic import GirderConnectionLogic
 from .girder_load_logic import GirderLoadLogic
+from .girder_save_logic import GirderSaveLogic
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,11 @@ class GirderLogic(BaseLogic[None]):
             temp_directory=app_config.temp_directory,
             date_format=app_config.date_format,
         )
+        self.save_logic = GirderSaveLogic(
+            server,
+            get_girder_client=lambda: self.load_logic.file_fetcher.girder_client,
+            temp_directory=app_config.temp_directory,
+        )
         self.scene_logic = scene_logic
 
         self.connection_logic.girder_connected.connect(self._update_config)
@@ -48,11 +54,19 @@ class GirderLogic(BaseLogic[None]):
         self.load_logic.item_unfetched.connect(scene_logic.remove_object)
 
         scene_logic.object_load_canceled.connect(self.load_logic.cancel_fetch_task)
+        scene_logic.object_save_requested.connect(self._save_object)
+        self.save_logic.object_saved.connect(scene_logic.on_object_saved)
+        self.save_logic.object_save_failed.connect(scene_logic.on_object_save_failed)
         scene_logic.object_removed.connect(self.browser_logic.unselect_item)
 
     def set_ui(self, ui: AppUI) -> None:
         self.connection_logic.set_ui(ui.girder_connection_ui)
         self.browser_logic.set_ui(ui.girder_browser_ui)
+
+    def _save_object(self, object_id: str) -> None:
+        object_logic = self.scene_logic.object_logics.get(object_id)
+        if object_logic is not None:
+            self.save_logic.save_object(object_logic)
 
     def _load_girder_config(self, app_config: AppConfig) -> None:
         if app_config.default_url is not None:

@@ -27,6 +27,7 @@ class SceneObjectUI(v3.VExpansionPanel):
     delete_clicked = Signal(str)
     visibility_clicked = Signal(str)
     overlay_clicked = Signal(str)
+    save_clicked = Signal(str)
 
     def __init__(self, obj: str, scene: str, **kwargs) -> None:
         super().__init__(classes="item-card", **kwargs)
@@ -83,6 +84,18 @@ class SceneObjectUI(v3.VExpansionPanel):
                         icon=("display.is_visible ? 'mdi-eye-outline' : 'mdi-eye-off-outline'",),
                         size="small",
                         tooltip=("display.is_visible ? 'Hide' : 'Show'",),
+                    )
+                    LoadingButton(
+                        v_if=(f"{self._obj}.gui.saving",),
+                        size="small",
+                        tooltip="Saving to Girder...",
+                    )
+                    Button(
+                        v_else=True,
+                        click_stop=(self.save_clicked, f"[{self._obj}._id]"),
+                        icon="mdi-content-save-outline",
+                        size="small",
+                        tooltip="Save to Girder",
                     )
 
             with v3.VExpansionPanelText(v_if=(f"!{self._obj}.gui.loading",)), v3.VCard():
@@ -201,6 +214,7 @@ class SceneUI(html.Div):
     segment_clicked = Signal(str, str)
     visibility_clicked = Signal(str)
     overlay_clicked = Signal(str)
+    save_clicked = Signal(str)
 
     def __init__(self, **kwargs):
         super().__init__(classes="scene-drawer", **kwargs)
@@ -212,6 +226,7 @@ class SceneUI(html.Div):
         self.object_ui.delete_clicked.connect(self.delete_clicked)
         self.object_ui.visibility_clicked.connect(self.visibility_clicked)
         self.object_ui.overlay_clicked.connect(self.overlay_clicked)
+        self.object_ui.save_clicked.connect(self.save_clicked)
         self.object_ui.filter_toolbar.filter_clicked.connect(self.filter_clicked)
         self.object_ui.filter_ui.segmentation_filter.add_segment_clicked.connect(self.add_segment_clicked)
         self.object_ui.filter_ui.segmentation_filter.delete_segment_clicked.connect(self.delete_segment_clicked)
@@ -236,4 +251,10 @@ class SceneUI(html.Div):
                 v_else=True,
                 classes="d-flex justify-center font-italic",
                 text="Select data to get started",
+            )
+            v3.VSnackbar(
+                v_model=(self._typed_state.name.is_notification_visible,),
+                color=(self._typed_state.name.notification_color,),
+                text=(self._typed_state.name.notification_message,),
+                timeout=5000,
             )
