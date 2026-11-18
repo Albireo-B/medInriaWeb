@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from trame_dataclass.v2 import StateDataModel, Sync, get_instance
 from trame_server import Server
@@ -41,6 +42,7 @@ class SceneLogic(BaseLogic[SceneState]):
     object_added = Signal(str)
     object_removed = Signal(str, str)
     object_load_canceled = Signal(str)
+    object_save_requested = Signal(str)
     segment_selected = Signal(vtkImageData, int)
     segment_cleared = Signal(vtkImageData, int)
 
@@ -100,11 +102,14 @@ class SceneLogic(BaseLogic[SceneState]):
         )
         self.add_object(filter_object)
 
-        return filter_object_logic_type(
+        filter_object_logic = filter_object_logic_type(
             original_logic=input_object_logic,
             server=self.server,
             scene_object=filter_object,
         )
+        filter_object_logic.source_database_id = input_object_logic.source_database_id
+        filter_object_logic.source_file_name = input_object_logic.source_file_name
+        return filter_object_logic
 
     def _cancel_load(self, object_id: str) -> None:
         scene_object = next((obj for obj in self.scene.objects if obj._id == object_id), None)
@@ -185,6 +190,7 @@ class SceneLogic(BaseLogic[SceneState]):
         scene_object: SceneObject = next((obj for obj in self.scene.objects if obj._id == object_id), None)
         if scene_object is not None:
             object_logic = self._create_file_object_logic(file_path, scene_object)
+            object_logic.source_file_name = Path(file_path).name
             object_logic.load_object_data(file_path)
 
             self._add_object_to_views(object_logic)
@@ -219,6 +225,35 @@ class SceneLogic(BaseLogic[SceneState]):
 
         self.volume_handler.toggle_object_overlay(object_logic)
 
+    def _notify(self, message: str, color: str) -> None:
+        self.data.notification_message = message
+        self.data.notification_color = color
+        self.data.is_notification_visible = True
+
+    def _set_object_saving(self, object_id: str, saving: bool) -> None:
+        scene_object = next((obj for obj in self.scene.objects if obj._id == object_id), None)
+        if scene_object is not None:
+            scene_object.gui.saving = saving
+
+    def _save_object(self, object_id: str) -> None:
+        object_logic = self.object_logics.get(object_id)
+        if object_logic is None or object_logic.object_data is None:
+            return
+        if object_logic.scene_object.gui.saving:
+            logger.debug(f"Scene object {object_id} is already being saved.")
+            return
+
+        self._set_object_saving(object_id, True)
+        self.object_save_requested(object_id)
+
+    def on_object_saved(self, object_id: str, file_name: str) -> None:
+        self._set_object_saving(object_id, False)
+        self._notify(f"Saved to Girder as {file_name}", "success")
+
+    def on_object_save_failed(self, object_id: str, reason: str) -> None:
+        self._set_object_saving(object_id, False)
+        self._notify(f"Could not save to Girder: {reason}", "error")
+
     def clear_scene(self):
         object_ids = [obj._id for obj in self.scene.objects]
         for object_id in object_ids:
@@ -230,6 +265,7 @@ class SceneLogic(BaseLogic[SceneState]):
         ui.filter_clicked.connect(self.add_filter_object_to_views)
         ui.visibility_clicked.connect(self.toggle_object_visibility)
         ui.overlay_clicked.connect(self.toggle_object_overlay)
+        ui.save_clicked.connect(self._save_object)
         ui.add_segment_clicked.connect(self._add_segment)
         ui.delete_segment_clicked.connect(self._delete_segment)
         ui.segment_clicked.connect(self._select_segment)

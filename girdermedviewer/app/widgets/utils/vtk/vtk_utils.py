@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
@@ -24,7 +25,9 @@ from vtk import (
     vtkMath,
     vtkMatrix4x4,
     vtkMetaImageReader,
+    vtkMetaImageWriter,
     vtkNIFTIImageReader,
+    vtkNIFTIImageWriter,
     vtkNrrdReader,
     vtkPiecewiseFunction,
     vtkPlane,
@@ -42,6 +45,7 @@ from vtk import (
     vtkVolumeProperty,
     vtkXMLImageDataReader,
     vtkXMLPolyDataReader,
+    vtkXMLPolyDataWriter,
 )
 from vtkmodules.all import (
     vtkCommand,
@@ -875,6 +879,18 @@ def load_volume(file_path):
     raise Exception(f"File format is not handled for {file_path}")
 
 
+def _get_mesh_axes_transform() -> vtkTransform:
+    """Inversion of x and y applied to meshes when they are loaded. It is its own inverse."""
+    matrix = vtkMatrix4x4()
+    matrix.SetElement(0, 0, -1)
+    matrix.SetElement(1, 1, -1)
+
+    transform = vtkTransform()
+    transform.SetMatrix(matrix)
+    transform.Inverse()
+    return transform
+
+
 def preload_mesh(file_path):
     if file_path.endswith(".stl"):
         reader = vtkSTLReader()
@@ -897,23 +913,66 @@ def load_mesh(file_path):
 
     reader = preload_mesh(file_path)
 
-    # Invert x and y
-    matrix = vtkMatrix4x4()
-    matrix.SetElement(0, 0, -1)
-    matrix.SetElement(1, 1, -1)
-
-    transform = vtkTransform()
-    transform.SetMatrix(matrix)
-    transform.Inverse()
-
     transform_filter = vtkTransformFilter()
     transform_filter.SetInputConnection(reader.GetOutputPort())
-    transform_filter.SetTransform(transform)
+    transform_filter.SetTransform(_get_mesh_axes_transform())
     transform_filter.Update()
 
     return transform_filter.GetOutput()
 
     return reader.GetOutput()
+
+
+def _check_file_written(writer, file_path: str) -> None:
+    """Some VTK writers (e.g. vtkMetaImageWriter) do not report failures, so also check the file."""
+    if writer.GetErrorCode() != 0 or not Path(file_path).is_file() or Path(file_path).stat().st_size == 0:
+        raise OSError(f"Could not write {file_path}")
+
+
+def save_volume(image_data: vtkImageData, file_path: str) -> None:
+    """
+    Write a vtkImageData to a file, such that load_volume gives back the same data.
+    Supported formats are NIfTI (.nii, .nii.gz) and MetaImage (.mha).
+    """
+    logger.info(f"Saving volume {file_path}")
+    if file_path.endswith((".nii", ".nii.gz")):
+        writer = vtkNIFTIImageWriter()
+        # load_volume already brings the image in the NIfTI world space, with the origin in image_data.
+        # The writer adds the image origin to the matrices it is given, so they must be identity.
+        writer.SetQFormMatrix(vtkMatrix4x4())
+        writer.SetSFormMatrix(vtkMatrix4x4())
+    elif file_path.endswith(".mha"):
+        writer = vtkMetaImageWriter()
+        writer.SetCompression(True)
+    else:
+        raise ValueError(f"File format is not handled for {file_path}")
+
+    writer.SetInputData(image_data)
+    writer.SetFileName(file_path)
+    writer.Write()
+    _check_file_written(writer, file_path)
+
+
+def save_mesh(poly_data: vtkPolyData, file_path: str) -> None:
+    """
+    Write a vtkPolyData to a file, such that load_mesh gives back the same data.
+    The only supported format is VTK PolyData (.vtp), which, unlike STL, keeps arrays and lines.
+    """
+    logger.info(f"Saving mesh {file_path}")
+    if not file_path.endswith(".vtp"):
+        raise ValueError(f"File format is not handled for {file_path}")
+
+    # Undo the inversion of x and y applied by load_mesh
+    transform_filter = vtkTransformFilter()
+    transform_filter.SetInputData(poly_data)
+    transform_filter.SetTransform(_get_mesh_axes_transform())
+    transform_filter.Update()
+
+    writer = vtkXMLPolyDataWriter()
+    writer.SetInputData(transform_filter.GetOutput())
+    writer.SetFileName(file_path)
+    writer.Write()
+    _check_file_written(writer, file_path)
 
 
 def create_streamline_filter(file_path, sphere) -> vtkExtractGeometry:

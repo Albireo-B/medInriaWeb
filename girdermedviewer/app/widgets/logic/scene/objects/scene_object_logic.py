@@ -44,6 +44,7 @@ class SceneObjectMetadata(StateDataModel):
 class SceneObjectGUI(StateDataModel):
     current_window = ClientOnly(str)
     loading = Sync(bool, True)
+    saving = Sync(bool, False)
     icon = Sync(str)
 
 
@@ -104,6 +105,9 @@ class SceneObjectLogic(BaseLogic[None], ABC):
         self.object_data = None
         self.input_id = None
         self.soft_input_id = None
+        # Girder item and file the data originally comes from, inherited by the objects computed from it
+        self.source_database_id: str | None = scene_object.database_id or None
+        self.source_file_name: str | None = None
 
     @property
     def is_visible(self) -> bool:
