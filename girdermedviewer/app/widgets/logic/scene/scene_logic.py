@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 from trame_dataclass.v2 import StateDataModel, Sync, get_instance
 from trame_server import Server
@@ -16,6 +17,8 @@ from ..base_logic import BaseLogic
 from ..vtk.views_logic import ViewsLogic
 from .filters import FILTER_MAP
 from .filters.segmentation_filter_logic import SegmentationFilterLogic
+from .filters.streamline_filter_logic import StreamlineFilterLogic
+from .filters.gaussian_filter_logic import GaussianFilterLogic
 from .handlers.mesh_handler import MeshHandler
 from .handlers.object_handler import ObjectHandler
 from .handlers.segmentation_handler import SegmentationHandler
@@ -42,7 +45,8 @@ class SceneLogic(BaseLogic[SceneState]):
     object_added = Signal(str)
     object_removed = Signal(str, str)
     object_load_canceled = Signal(str)
-    object_save_requested = Signal(str)
+    # object_id, folder_id, filename, overwrite
+    object_save_requested = Signal(str, str, str, bool)
     segment_selected = Signal(vtkImageData, int)
     segment_cleared = Signal(vtkImageData, int)
 
@@ -54,6 +58,7 @@ class SceneLogic(BaseLogic[SceneState]):
         self.object_logics: dict[str, SceneObjectLogic] = {}
         self._init_presets(views_logic)
 
+        self.bind_changes({self.name.folder_dialog_visible: self._on_folder_dialog_visibility_changed})
         self.mesh_handler = MeshHandler(self.server, views_logic)
         self.volume_handler = VolumeHandler(self.server, views_logic)
         self.segmentation_handler = SegmentationHandler(self.server, views_logic)
@@ -95,9 +100,13 @@ class SceneLogic(BaseLogic[SceneState]):
         if filter_object_logic_type is None:
             raise ValueError(f"No logic associated to filter type: {filter_type.value}")
 
+        base_name = input_object_logic.scene_object.name
+        if "." in base_name:
+            base_name = base_name.rsplit(".", 1)[0]
+
         filter_object = SceneObject(
             self.server,
-            name=f"{input_object_logic.scene_object.name}_{filter_type.value}",
+            name=f"{base_name}_{filter_type.value}",
             filter_type=filter_type,
         )
         self.add_object(filter_object)
@@ -235,10 +244,91 @@ class SceneLogic(BaseLogic[SceneState]):
         if scene_object is not None:
             scene_object.gui.saving = saving
 
+    def _show_save_dialog(self, object_id: str) -> None:
+        object_logic = self.object_logics.get(object_id)
+        # Add suffix for filter types
+        extension = ""
+        if isinstance(object_logic, SegmentationFilterLogic):
+            extension = FilterType.SEGMENTATION.value
+        elif isinstance(object_logic, GaussianFilterLogic):
+            extension = FilterType.GAUSSIAN_BLUR.value
+        elif isinstance(object_logic, StreamlineFilterLogic):
+            extension = FilterType.STREAMLINE.value
+
+        base_name = object_logic.scene_object.name
+
+        # Remove file extension
+        if "." in base_name:
+            base_name = base_name.rsplit(".", 1)[0]
+
+        base_name = f"{base_name}_{extension}"
+        self.data.save_dialog_filename = base_name
+        self.data.save_dialog_folder_id = None
+        # Set default folder (source folder if available)
+        if object_logic.source_database_id:
+            # Get folder from source item
+            try:
+                client = self.girder_client
+                item = client.getItem(object_logic.source_database_id)
+                folder_id = item.get("folderId")
+                if folder_id:
+                    self.data.save_dialog_folder_name = client.getFolder(folder_id).get("name")
+                    self.data.save_dialog_folder_id = folder_id
+                else:
+                    logger.warning(f"Item {object_logic.source_database_id} has no folderId")
+            except Exception as e:
+                logger.exception(f"Could not get folder for source item {object_logic.source_database_id}: {e}")
+        else:
+            logger.debug(f"No source_database_id for object {object_id}")
+
+        # Initialize folder dialog location to current browser location
+        self.data.folder_dialog_location = None
+        if self.data.save_dialog_folder_id:
+            self.data.folder_dialog_location = {"_id": self.data.save_dialog_folder_id, "_modelType": "folder"}
+
+        self.data.save_dialog_object_id = object_id
+        self.data.save_dialog_overwrite = False
+        self.data.save_dialog_visible = True
+
+    def _confirm_save(self) -> None:
+        object_id = self.data.save_dialog_object_id
+        folder_id = self.data.save_dialog_folder_id
+        self.data.save_dialog_visible = False
+        self._set_object_saving(object_id, True)
+        self.object_save_requested(object_id, folder_id, self.data.save_dialog_filename, self.data.save_dialog_overwrite)
+
+    def _on_folder_selected(self, location: dict[str, Any]) -> None:
+        if not location or location.get("_modelType") != "folder":
+            return
+
+        folder_id = location.get("_id")
+        if not folder_id:
+            return
+
+        try:
+            folder = self.girder_client.getFolder(folder_id)
+            self.data.save_dialog_folder_name = folder["name"]
+            self.data.save_dialog_folder_id = folder_id
+            # Close the dialog and reset its navigation state.
+            self.data.folder_dialog_visible = False
+            self.data.folder_dialog_location = None
+        except Exception:
+            logger.exception(f"Could not select Girder folder {folder_id}")
+
+    def _on_folder_dialog_visibility_changed(self, visible: bool) -> None:
+        if not visible:
+            self.data.folder_dialog_location = None
+            return
+
+        # Use the currently selected save folder
+        if self.data.save_dialog_folder_id:
+            self.data.folder_dialog_location = {"_id": self.data.save_dialog_folder_id, "_modelType": "folder"}
+
     def _save_object(self, object_id: str) -> None:
         object_logic = self.object_logics.get(object_id)
         if object_logic is None or object_logic.object_data is None:
             return
+
         if object_logic.scene_object.gui.saving:
             logger.debug(f"Scene object {object_id} is already being saved.")
             return
@@ -265,7 +355,9 @@ class SceneLogic(BaseLogic[SceneState]):
         ui.filter_clicked.connect(self.add_filter_object_to_views)
         ui.visibility_clicked.connect(self.toggle_object_visibility)
         ui.overlay_clicked.connect(self.toggle_object_overlay)
-        ui.save_clicked.connect(self._save_object)
+        ui.save_clicked.connect(self._show_save_dialog)
+        ui.save_confirmed.connect(self._confirm_save)
+        ui.folder_selected.connect(self._on_folder_selected)
         ui.add_segment_clicked.connect(self._add_segment)
         ui.delete_segment_clicked.connect(self._delete_segment)
         ui.segment_clicked.connect(self._select_segment)

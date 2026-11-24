@@ -83,8 +83,10 @@ class GirderSaveLogic(BaseLogic[None]):
         self._upload_lock = threading.Lock()
         self.save_tasks: dict[str, asyncio.Task] = {}
 
-    def _get_unique_item_name(self, client: GirderClient, folder_id: str, stem: str, extension: str) -> str:
+    def _get_unique_item_name(self, client: GirderClient, folder_id: str, stem: str, extension: str, overwrite: bool = False) -> str:
         name = f"{stem}{extension}"
+        if overwrite:
+            return name
         counter = 0
         while next(iter(client.listItem(folder_id, name=name)), None) is not None:
             counter += 1
@@ -98,23 +100,61 @@ class GirderSaveLogic(BaseLogic[None]):
         stem: str,
         extension: str,
         source_item_id: str,
+        folder_id: str | None = None,
+        filename: str = "",
+        overwrite: bool = False,
+        segmentation_metadata: dict | None = None,
     ) -> str:
         """Blocking, to be run in a thread. Returns the name of the item created in Girder."""
         client = self._get_girder_client()
-        folder_id = client.getItem(source_item_id)["folderId"]
+        if folder_id is None:
+            folder_id = client.getItem(source_item_id)["folderId"]
 
         with TemporaryDirectory(dir=self._temp_directory) as temp_dir:
-            file_path = str(Path(temp_dir) / f"data{extension}")
+            # Use provided filename or generate one
+            if filename:
+                name = filename
+                # Ensure extension matches
+                if not name.endswith(extension):
+                    name = f"{Path(name).stem}{extension}"
+            else:
+                name = self._get_unique_item_name(client, folder_id, stem, extension, overwrite)
+
+            file_path = str(Path(temp_dir) / name)
             if is_volume:
                 save_volume(data, file_path)
             else:
                 save_mesh(data, file_path)
 
             with self._upload_lock:
-                name = self._get_unique_item_name(client, folder_id, stem, extension)
                 logger.debug(f"Uploading {name} to folder {folder_id}")
-                client.uploadFileToFolder(folder_id, file_path, filename=name)
-        return name
+                existing_item = (
+                    next(iter(client.listItem(folder_id, name=name)), None)
+                    if overwrite
+                    else None
+                )
+
+                if existing_item is not None:
+                    files = list(client.listFile(existing_item["_id"]))
+                    if not files or len(files) != 1:
+                        raise RuntimeError(f"Cannot overwrite '{name}': existing item doesn't have the correct amount of file (expected : 1)")
+
+                    existing_file = files[0]
+                    with open(file_path, "rb") as stream:
+                        client.put(f"file/{existing_file['_id']}/contents", parameters={"size": Path(file_path).stat().st_size}, data=stream,)
+
+                    item_id = existing_item["_id"]
+                    item_name = existing_item["name"]
+                else:
+                    file = client.uploadFileToFolder(folder_id, file_path, filename=name)
+                    item_id = file["itemId"]
+                    item_name = client.getItem(item_id)["name"]
+
+                # Save segmentation metadata as Girder item metadata
+                if segmentation_metadata:
+                    client.addMetadataToItem(item_id, segmentation_metadata)
+
+        return item_name
 
     async def _save(
         self,
@@ -124,9 +164,24 @@ class GirderSaveLogic(BaseLogic[None]):
         stem: str,
         extension: str,
         source_item_id: str,
+        folder_id: str | None = None,
+        filename: str = "",
+        overwrite: bool = False,
+        segmentation_metadata: dict | None = None,
     ) -> None:
         try:
-            name = await asyncio.to_thread(self._write_and_upload, data, is_volume, stem, extension, source_item_id)
+            name = await asyncio.to_thread(
+                self._write_and_upload,
+                data,
+                is_volume,
+                stem,
+                extension,
+                source_item_id,
+                folder_id,
+                filename,
+                overwrite,
+                segmentation_metadata,
+            )
             self.object_saved(object_id, name)
         except Exception as error:  # The task must always report back, otherwise the object stays "saving"
             logger.exception(f"Error saving {object_id} to Girder")
@@ -135,7 +190,36 @@ class GirderSaveLogic(BaseLogic[None]):
             self.state.flush()
             self.save_tasks.pop(object_id, None)
 
-    def save_object(self, object_logic: SceneObjectLogic) -> None:
+    def _extract_segmentation_metadata(self, object_logic: SceneObjectLogic) -> dict | None:
+        """Extract segmentation metadata to save as Girder item metadata."""
+        from ..scene.filters.segmentation_filter_logic import SegmentationFilterLogic
+
+        if not isinstance(object_logic, SegmentationFilterLogic):
+            return None
+
+        segments_data = []
+        for segment in object_logic.segments:
+            segments_data.append({
+                "name": segment.name,
+                "value": segment.value,
+                "color": segment.display.color,
+                "is_visible": segment.display.is_visible,
+            })
+
+        return {
+            "segmentation": {
+                "segments": segments_data,
+                "source_image_id": object_logic.input_id,
+            }
+        }
+
+    def save_object(
+        self,
+        object_logic: SceneObjectLogic,
+        folder_id: str | None = None,
+        filename: str = "",
+        overwrite: bool = False,
+    ) -> None:
         object_id = object_logic._id
         if object_logic.object_data is None or not object_logic.source_database_id:
             self.object_save_failed(object_id, "the Girder location of this data is unknown")
@@ -146,6 +230,8 @@ class GirderSaveLogic(BaseLogic[None]):
         data.DeepCopy(object_logic.object_data)
 
         is_volume = object_logic.scene_object.object_type == SceneObjectType.VOLUME
+        segmentation_metadata = self._extract_segmentation_metadata(object_logic)
+
         self.save_tasks[object_id] = create_task(
             self._save(
                 object_id,
@@ -154,5 +240,9 @@ class GirderSaveLogic(BaseLogic[None]):
                 _get_name_stem(object_logic.scene_object.name, object_logic.source_file_name),
                 _get_output_extension(is_volume, object_logic.source_file_name),
                 object_logic.source_database_id,
+                folder_id,
+                filename,
+                overwrite,
+                segmentation_metadata,
             )
         )

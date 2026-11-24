@@ -42,6 +42,7 @@ class GirderLogic(BaseLogic[None]):
             temp_directory=app_config.temp_directory,
         )
         self.scene_logic = scene_logic
+        self.scene_logic.girder_client = self.load_logic.file_fetcher.girder_client
 
         self.connection_logic.girder_connected.connect(self._update_config)
         self.connection_logic.user_connected.connect(self._update_user)
@@ -63,10 +64,10 @@ class GirderLogic(BaseLogic[None]):
         self.connection_logic.set_ui(ui.girder_connection_ui)
         self.browser_logic.set_ui(ui.girder_browser_ui)
 
-    def _save_object(self, object_id: str) -> None:
+    def _save_object(self, object_id: str, folder_id: str | None = None, filename: str = "", overwrite: bool = False) -> None:
         object_logic = self.scene_logic.object_logics.get(object_id)
         if object_logic is not None:
-            self.save_logic.save_object(object_logic)
+            self.save_logic.save_object(object_logic, folder_id, filename, overwrite)
 
     def _load_girder_config(self, app_config: AppConfig) -> None:
         if app_config.default_url is not None:
